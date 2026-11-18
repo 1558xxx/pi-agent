@@ -1,6 +1,5 @@
 /**
- * Agent loop that works with AgentMessage throughout.
- * Transforms to Message[] only at the LLM call boundary.
+ * 智能体循环全程使用 AgentMessage，仅在调用大语言模型的边界转换为 Message[]。
  */
 
 import {
@@ -35,14 +34,12 @@ import type {
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
 /**
- * Request identity of agent loops: pi-ai's defaults with provider attribution to pi. `AgentLoopConfig.identity`
- * overrides it field by field.
+ * 智能体循环的请求身份：沿用 pi-ai 默认值，并将提供方归属设为 Pi。AgentLoopConfig.identity 按字段覆盖默认身份。
  */
 export const DEFAULT_AGENT_IDENTITY: ClientIdentity = { attribution: PI_ATTRIBUTION };
 
 /**
- * Start an agent loop with a new prompt message.
- * The prompt is added to the context and events are emitted for it.
+ * 用新提示消息启动智能体循环；将提示加入上下文，并发出相应生命周期事件。
  */
 export function agentLoop(
 	prompts: AgentMessage[],
@@ -70,12 +67,8 @@ export function agentLoop(
 }
 
 /**
- * Continue an agent loop from the current context without adding a new message.
- * Used for retries - context already has user message or tool results.
- *
- * **Important:** The last message in context must convert to a `user` or `toolResult` message
- * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
- * This cannot be validated here since `convertToLlm` is only called once per turn.
+ * 从当前上下文继续循环，不追加新消息，适用于上下文已包含用户消息或工具结果的重试。
+ * 重要：最后一条消息经 convertToLlm 转换后必须是 user 或 toolResult，否则提供方会拒绝请求。convertToLlm 每轮仅调用一次，因此此处无法预先验证该条件。
  */
 export function agentLoopContinue(
 	context: AgentContext,
@@ -167,7 +160,7 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 }
 
 /**
- * Main loop logic shared by agentLoop and agentLoopContinue.
+ * agentLoop 与 agentLoopContinue 共用的主循环。
  */
 async function runLoop(
 	initialContext: AgentContext,
@@ -181,14 +174,14 @@ async function runLoop(
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	let explicitContinuation = false;
-	// Check for steering messages at start (user may have typed while waiting)
+	// 启动时检查引导消息，接收用户等待期间输入的调整指令。
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
-	// Outer loop: continues when queued follow-up messages arrive after agent would stop
+	// 外层循环：智能体原本应结束时，若还有后续消息则继续执行。
 	while (true) {
 		let hasMoreToolCalls = true;
 
-		// Inner loop: process tool calls and steering messages
+		// 内层循环：处理工具调用与引导消息。
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
 			let preparedMessages: AgentMessage[] = [];
 			if (lastCompletedTurn) {
@@ -207,16 +200,16 @@ async function runLoop(
 									: nextTurnSnapshot.thinkingLevel,
 					};
 				}
-				// Preparation can be long-running (for example, compaction). Pick up steering
-				// queued while it ran. Only poll again if the earlier poll returned nothing;
-				// otherwise one-at-a-time mode would deliver two messages in this turn.
+				// 准备步骤可能较慢，例如上下文压缩；完成后接收期间新入队的引导消息。
+				// 只有此前没有取到消息时才再次轮询；
+				// 否则 one-at-a-time 模式会在同一轮投递两条消息。
 				if (pendingMessages.length === 0) {
 					pendingMessages = (await config.getSteeringMessages?.()) || [];
 				}
 				await emit({ type: "turn_start" });
 			}
 
-			// Process prepared and queued messages before the next assistant response.
+			// 生成下一条助手回复前，先处理准备步骤产出的消息及队列消息。
 			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
 				await emit({ type: "message_start", message });
 				await emit({ type: "message_end", message });
@@ -247,7 +240,7 @@ async function runLoop(
 				};
 			}
 
-			// Stream assistant response
+			// 以流式方式生成助手回复。
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
 			newMessages.push(message);
 
@@ -264,15 +257,15 @@ async function runLoop(
 				return;
 			}
 
-			// Check for tool calls
+			// 检查助手是否请求调用工具。
 			const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
 			if (toolCalls.length > 0) {
-				// A "length" stop means the output was cut off by the token limit, so
-				// every tool call in the message may carry truncated arguments. Fail
-				// them all instead of executing potentially borked calls.
+				// length 表示输出被 token 上限截断，
+				// 本条消息中所有工具调用的参数都可能不完整；
+				// 统一返回失败，避免执行参数已损坏的调用。
 				const executedToolBatch =
 					message.stopReason === "length"
 						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
@@ -307,22 +300,22 @@ async function runLoop(
 			}
 		}
 
-		// Agent would stop here. Check for follow-up messages.
+		// 智能体本应在这里结束，先检查后续消息队列。
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
-			// Set as pending so inner loop processes them
+			// 转为待处理消息，交由内层循环处理。
 			explicitContinuation = false;
 			pendingMessages = followUpMessages;
 			continue;
 		}
 
-		// No natural request was selected, so fulfill the continuation decision with one context-only turn.
+		// 没有其他机制选中下一次请求时，用仅包含当前上下文的一轮满足显式继续决策。
 		if (explicitContinuation) {
 			explicitContinuation = false;
 			continue;
 		}
 
-		// No more messages, exit
+		// 没有待处理消息，退出循环。
 		break;
 	}
 
@@ -330,14 +323,8 @@ async function runLoop(
 }
 
 /**
- * Declare tool loadout changes to the model.
- *
- * `context.tools` is what the runtime can execute; the transcript's system messages declare
- * what the model may call. Before each request the difference becomes `toolsAdded` and
- * `toolsRemoved` on a system message. When a pending system message exists, its tool fields
- * are treated as intent and replaced with the delta between the committed transcript and
- * the executable set, so replay always yields exactly `context.tools`. Otherwise a new
- * system message is inserted before the first non-system pending message.
+ * 向模型声明可执行工具集合的变化。
+ * context.tools 是运行时实际可执行的工具；对话中的系统消息声明模型可调用的工具。每次请求前，将差异写入系统消息的 toolsAdded 和 toolsRemoved。若已有待处理系统消息，将其工具字段视为变更意图，并替换为已提交对话与实际工具集合的差异，确保重放结果精确对应 context.tools；否则在首条非系统待处理消息前插入新系统消息。
  */
 function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage[]): AgentMessage[] {
 	let systemIndex = -1;
@@ -360,7 +347,7 @@ function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage
 	const unchanged = changes.toolsAdded.length === 0 && changes.toolsRemoved.length === 0;
 
 	if (pending) {
-		// Keep the caller's message object when it already declares no tool changes.
+		// 若调用方消息已明确不含工具变更，保留其原对象。
 		if (unchanged && !pending.toolsAdded?.length && !pending.toolsRemoved?.length) return pendingMessages;
 		return baseline.map((message, index) => (index === systemIndex ? withToolChanges(pending, changes) : message));
 	}
@@ -373,7 +360,9 @@ function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage
 
 const NO_CHANGES: ToolStateChanges = { toolsAdded: [], toolsRemoved: [] };
 
-/** Copy a system message with its tool fields replaced by `changes`; empty lists omit the field. */
+/**
+ * 复制系统消息，将工具字段替换为 changes；空列表对应的字段不写入结果。
+ */
 function withToolChanges(message: SystemMessage, { toolsAdded, toolsRemoved }: ToolStateChanges): SystemMessage {
 	const { toolsAdded: _added, toolsRemoved: _removed, ...rest } = message;
 	return {
@@ -384,8 +373,7 @@ function withToolChanges(message: SystemMessage, { toolsAdded, toolsRemoved }: T
 }
 
 /**
- * Stream an assistant response from the LLM.
- * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ * 从大语言模型流式获取助手回复；在这里将 AgentMessage[] 转为模型使用的 Message[]。
  */
 async function streamAssistantResponse(
 	context: AgentContext,
@@ -394,18 +382,18 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 ): Promise<AssistantMessage> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
+	// 若配置了上下文转换，先执行 AgentMessage[] → AgentMessage[]。
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
 
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
+	// 转换为模型兼容消息：AgentMessage[] → Message[]。
 	const llmMessages = await config.convertToLlm(messages);
 
 	const llmContext = normalizeContext({ messages: llmMessages });
 
-	// Resolve API key (important for expiring tokens)
+	// 动态解析 API 密钥，支持会过期的令牌。
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 
@@ -415,7 +403,7 @@ async function streamAssistantResponse(
 		identity: mergeClientIdentity(DEFAULT_AGENT_IDENTITY, config.identity),
 		signal,
 	});
-	// Record the requested level, whichever stream function answered.
+	// 无论由哪个流函数响应，都记录本次请求的推理级别。
 	const result = async () => Object.assign(await response.result(), { thinkingLevel: config.reasoning ?? "off" });
 
 	let partialMessage: AssistantMessage | null = null;
@@ -479,11 +467,7 @@ async function streamAssistantResponse(
 }
 
 /**
- * Fail all tool calls from an assistant message that was truncated by the
- * output token limit. Streamed tool-call arguments are finalized with a
- * best-effort JSON salvage parser, so a truncated message can yield tool calls
- * whose arguments parse and validate but are silently incomplete. None of them
- * are safe to execute; report each as an error so the model can re-issue them.
+ * 对因输出 token 上限截断的助手消息，将其中全部工具调用标为失败。流式参数使用尽力恢复的 JSON 解析器，截断参数可能通过解析和校验却仍缺失内容，因此不能执行；逐项返回错误，让模型用完整参数重新调用。
  */
 async function failToolCallsFromTruncatedMessage(
 	toolCalls: AgentToolCall[],
@@ -513,7 +497,7 @@ async function failToolCallsFromTruncatedMessage(
 }
 
 /**
- * Execute tool calls from an assistant message.
+ * 执行助手消息请求的工具调用。
  */
 async function executeToolCalls(
 	currentContext: AgentContext,
@@ -680,7 +664,9 @@ type ExecutedToolCallOutcome = {
 
 type FinalizedToolCallOutcome = AgentToolCallOutcome;
 
-/** The `beforeToolCall` and `afterToolCall` hooks of {@link AgentLoopConfig}. */
+/**
+ * AgentLoopConfig 中的 beforeToolCall 与 afterToolCall 钩子。
+ */
 export type ToolCallHooks = Pick<AgentLoopConfig, "beforeToolCall" | "afterToolCall">;
 
 type ToolUpdateSink = (partialResult: AgentToolResult<any>) => Promise<void> | void;
@@ -713,8 +699,8 @@ async function prepareToolCall(
 	signal: AbortSignal | undefined,
 	tools: readonly AgentTool<any>[] = currentContext.tools ?? [],
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
-	// Once aborted, skip preparation and the hooks; callers still record this result, so no call
-	// is left without one (#9986).
+	// 取消后跳过参数准备与钩子，调用方仍记录结果，
+	// 确保每项调用都有对应结果（#9986）。
 	if (signal?.aborted) {
 		return {
 			kind: "immediate",
@@ -789,27 +775,29 @@ function emitToolExecutionUpdate(toolCall: AgentToolCall, emit: AgentEventSink):
 		});
 }
 
-/** Options for {@link runToolCall}. */
+/**
+ * runToolCall 的调用选项。
+ */
 export interface RunToolCallOptions extends ToolCallHooks {
-	/** Tools the call resolves against. */
+	/**
+	 * 用于按名称解析本次调用的工具集合。
+	 */
 	tools: readonly AgentTool<any>[];
-	/** Passed to the hooks as the message that issued the call. */
+	/**
+	 * 作为发起工具调用的助手消息传给钩子。
+	 */
 	assistantMessage: AssistantMessage;
-	/** Passed to the hooks as the current agent context. */
+	/**
+	 * 作为当前智能体上下文传给钩子。
+	 */
 	context: AgentContext;
 	signal?: AbortSignal;
 	onUpdate?: ToolUpdateSink;
 }
 
 /**
- * Run one tool call through the same steps as a model-issued call: argument preparation, schema
- * validation, `beforeToolCall`, execution, and `afterToolCall`. Emits no events and adds no
- * messages. Tools that call other tools use this so the hooks (for example permission checks)
- * apply to those calls too.
- *
- * Never rejects for tool failures: an aborted `signal`, unknown tools, validation errors, blocked
- * calls, and thrown errors come back as `isError: true`. An aborted `signal` is checked first,
- * before the hooks run.
+ * 按模型发起调用的相同步骤执行单项工具调用：参数准备、Schema 校验、beforeToolCall、工具执行及 afterToolCall。此函数不发出事件，也不追加消息；工具嵌套调用其他工具时可复用它，让权限检查等钩子同样生效。
+ * 工具失败不导致 Promise 拒绝：取消信号、未知工具、参数错误、阻断和执行异常都以 isError: true 返回。在任何钩子运行前优先检查取消信号。
  */
 export async function runToolCall(toolCall: AgentToolCall, options: RunToolCallOptions): Promise<AgentToolCallOutcome> {
 	const { assistantMessage, context, signal } = options;
@@ -884,7 +872,7 @@ async function finalizeExecutedToolCall(
 				signal,
 			);
 			if (afterResult) {
-				// Structured content not replaced along with the content may no longer match it.
+				// 替换 content 却未同步替换结构化内容时，原结构化内容可能已不再匹配。
 				const structuredContent =
 					afterResult.structuredContent ?? (afterResult.content ? undefined : result.structuredContent);
 				result = {
@@ -935,8 +923,8 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		role: "toolResult",
 		toolCallId: finalized.toolCall.id,
 		toolName: finalized.toolCall.name,
-		// Untyped tools (JS extensions) can return results without content; normalize
-		// so the null never enters session history or provider payloads.
+		// 无类型工具（如 JavaScript 扩展）可能省略 content，先规范化，
+		// 避免空值进入会话历史或提供方请求。
 		content: finalized.result.content ?? [],
 		details: finalized.result.details,
 		usage: finalized.result.usage,
